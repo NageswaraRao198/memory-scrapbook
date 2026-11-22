@@ -4,7 +4,9 @@ import path from 'node:path';
 export interface AppConfig {
   nodeEnv: 'development' | 'production' | 'test';
   port: number;
-  databasePath: string;
+  /** Hosted Postgres (e.g. Neon). When null, an embedded Postgres in `localDataDir` is used (development only). */
+  databaseUrl: string | null;
+  localDataDir: string;
   allowedOrigins: string[];
   sessionTtlDays: number;
   trustProxy: boolean;
@@ -32,7 +34,8 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   const config: AppConfig = {
     nodeEnv,
     port: Number(process.env.PORT ?? 4000),
-    databasePath: process.env.DATABASE_PATH ?? path.resolve(process.cwd(), 'data', 'scrapbook.db'),
+    databaseUrl: process.env.DATABASE_URL?.trim() || null,
+    localDataDir: process.env.LOCAL_DATA_DIR ?? path.resolve(process.cwd(), 'data', 'pglite'),
     allowedOrigins: (process.env.CLIENT_ORIGIN ?? 'http://localhost:5173,http://127.0.0.1:5173')
       .split(',')
       .map((o) => o.trim())

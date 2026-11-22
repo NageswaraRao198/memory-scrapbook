@@ -26,9 +26,9 @@ describe('authentication', () => {
     const weak = await request(app).post('/api/v1/auth/setup').send({ email: 'a@example.com', password: 'short' });
     expect(weak.status).toBe(400);
     await signUpOwner(app);
-    const row = db.prepare('SELECT password_hash FROM users').get() as { password_hash: string };
-    expect(row.password_hash).not.toContain(PASSWORD);
-    expect(row.password_hash.startsWith('scrypt$')).toBe(true);
+    const [row] = await db.query<{ password_hash: string }>('SELECT password_hash FROM users');
+    expect(row!.password_hash).not.toContain(PASSWORD);
+    expect(row!.password_hash.startsWith('scrypt$')).toBe(true);
   });
 
   it('requires a session for private routes', async () => {
@@ -83,7 +83,7 @@ describe('authentication', () => {
   it('expires old sessions', async () => {
     const { app, db } = buildTestApp();
     const s = await signUpOwner(app);
-    db.prepare('UPDATE sessions SET expires_at = ?').run(new Date(Date.now() - 1000).toISOString());
+    await db.query('UPDATE sessions SET expires_at = $1', [new Date(Date.now() - 1000).toISOString()]);
     expect((await s.get('/auth/me')).status).toBe(401);
   });
 

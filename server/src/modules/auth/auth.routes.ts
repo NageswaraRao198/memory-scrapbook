@@ -1,9 +1,9 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { Router } from 'express';
+import { type Response, Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import type { AppConfig } from '../../config/env.js';
-import type { Db, Row } from '../../db/database.js';
+import { type Db, type Row, one } from '../../db/database.js';
 import { SESSION_COOKIE, createSession, getAuth, requireAuth, sessionCookieOptions } from '../../middleware/auth.js';
 import { HttpError } from '../../utils/errors.js';
 import { hashPassword, verifyPassword } from '../../utils/password.js';
@@ -70,23 +70,23 @@ export function authRouter(db: Db, config: AppConfig): Router {
     message: { error: { code: 'rate_limited', message: 'Too many attempts. Please wait a little while and try again.' } },
   });
 
-  const startSession = (res: import('express').Response, userId: string) => {
-    const { token, csrfToken, ttlMs } = createSession(db, config, userId);
+  const startSession = async (res: Response, userId: string) => {
+    const { token, csrfToken, ttlMs } = await createSession(db, config, userId);
     res.cookie(SESSION_COOKIE, token, sessionCookieOptions(config, ttlMs));
     return csrfToken;
   };
 
-  const findUser = (id: string) => db.prepare('SELECT * FROM users WHERE id = ?').get(id) as Row | undefined;
+  const findUser = (id: string) => one(db, 'SELECT * FROM users WHERE id = $1', [id]);
+  const userCount = async () => (await one<{ count: number }>(db, 'SELECT COUNT(*)::int AS count FROM users'))!.count;
 
-  router.get('/status', (_req, res) => {
-    const { count } = db.prepare('SELECT COUNT(*) AS count FROM users').get() as { count: number };
-    res.json({ setupRequired: count === 0, setupTokenRequired: count === 0 && config.setupToken !== null });
+  router.get('/status', async (_req, res) => {
+    const setupRequired = (await userCount()) === 0;
+    res.json({ setupRequired, setupTokenRequired: setupRequired && config.setupToken !== null });
   });
 
   router.post('/setup', limiter, async (req, res) => {
     const body = parse(setupSchema, req.body);
-    const { count } = db.prepare('SELECT COUNT(*) AS count FROM users').get() as { count: number };
-    if (count > 0) throw new HttpError(409, 'already_set_up', 'This diary already has an owner.');
+    if ((await userCount()) > 0) throw new HttpError(409, 'already_set_up', 'This diary already has an owner.');
     if (config.setupToken) {
       const given = Buffer.from(body.setupToken ?? '');
       const expected = Buffer.from(config.setupToken);
@@ -96,69 +96,71 @@ export function authRouter(db: Db, config: AppConfig): Router {
     }
     const id = randomUUID();
     const now = nowIso();
-    db.prepare(
+    await db.query(
       `INSERT INTO users (id, email, password_hash, display_name, timezone, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run(id, body.email, await hashPassword(body.password), body.displayName ?? null, body.timezone ?? 'UTC', now, now);
-    const csrfToken = startSession(res, id);
-    res.status(201).json({ user: toUser(findUser(id)!), csrfToken });
+       VALUES ($1, $2, $3, $4, $5, $6, $6)`,
+      [id, body.email, await hashPassword(body.password), body.displayName ?? null, body.timezone ?? 'UTC', now],
+    );
+    const csrfToken = await startSession(res, id);
+    res.status(201).json({ user: toUser((await findUser(id))!), csrfToken });
   });
 
   router.post('/login', limiter, async (req, res) => {
     const body = parse(loginSchema, req.body);
-    const row = db.prepare('SELECT * FROM users WHERE email = ?').get(body.email) as Row | undefined;
+    const row = await one(db, 'SELECT * FROM users WHERE email = $1', [body.email]);
     dummyHash ??= hashPassword('not-a-real-password');
     const valid = await verifyPassword(body.password, row ? String(row.password_hash) : await dummyHash);
     if (!row || !valid) throw new HttpError(401, 'invalid_credentials', 'That email and password do not match.');
-    const csrfToken = startSession(res, String(row.id));
+    const csrfToken = await startSession(res, String(row.id));
     res.json({ user: toUser(row), csrfToken });
   });
 
-  router.post('/logout', requireAuth, (_req, res) => {
+  router.post('/logout', requireAuth, async (_req, res) => {
     const auth = getAuth(res);
-    db.prepare('DELETE FROM sessions WHERE id = ?').run(auth.sessionId);
+    await db.query('DELETE FROM sessions WHERE id = $1', [auth.sessionId]);
     res.clearCookie(SESSION_COOKIE, sessionCookieOptions(config));
     res.status(204).end();
   });
 
-  router.get('/me', requireAuth, (_req, res) => {
+  router.get('/me', requireAuth, async (_req, res) => {
     const auth = getAuth(res);
-    const row = findUser(auth.userId);
+    const row = await findUser(auth.userId);
     if (!row) throw new HttpError(401, 'unauthenticated', 'Please sign in to continue.');
     res.json({ user: toUser(row), csrfToken: auth.csrfToken });
   });
 
-  router.patch('/profile', requireAuth, (req, res) => {
+  router.patch('/profile', requireAuth, async (req, res) => {
     const auth = getAuth(res);
     const body = parse(profileSchema, req.body);
-    const current = findUser(auth.userId)!;
-    db.prepare(
-      `UPDATE users SET display_name = ?, timezone = ?, theme = ?, ai_enabled = ?, editor_mode = ?, updated_at = ? WHERE id = ?`,
-    ).run(
-      body.displayName !== undefined ? body.displayName || null : ((current.display_name as string | null) ?? null),
-      body.timezone ?? String(current.timezone),
-      body.theme ?? String(current.theme),
-      body.aiEnabled !== undefined ? Number(body.aiEnabled) : Number(current.ai_enabled),
-      body.defaultEditorMode ?? String(current.editor_mode),
-      nowIso(),
-      auth.userId,
+    const current = (await findUser(auth.userId))!;
+    await db.query(
+      `UPDATE users SET display_name = $1, timezone = $2, theme = $3, ai_enabled = $4, editor_mode = $5, updated_at = $6 WHERE id = $7`,
+      [
+        body.displayName !== undefined ? body.displayName || null : ((current.display_name as string | null) ?? null),
+        body.timezone ?? String(current.timezone),
+        body.theme ?? String(current.theme),
+        body.aiEnabled ?? Boolean(current.ai_enabled),
+        body.defaultEditorMode ?? String(current.editor_mode),
+        nowIso(),
+        auth.userId,
+      ],
     );
-    res.json({ user: toUser(findUser(auth.userId)!) });
+    res.json({ user: toUser((await findUser(auth.userId))!) });
   });
 
   router.post('/change-password', requireAuth, limiter, async (req, res) => {
     const auth = getAuth(res);
     const body = parse(changePasswordSchema, req.body);
-    const row = findUser(auth.userId)!;
+    const row = (await findUser(auth.userId))!;
     if (!(await verifyPassword(body.currentPassword, String(row.password_hash)))) {
       throw new HttpError(400, 'wrong_password', 'Your current password does not match.');
     }
-    db.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?').run(
+    await db.query('UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3', [
       await hashPassword(body.newPassword),
       nowIso(),
       auth.userId,
-    );
-    db.prepare('DELETE FROM sessions WHERE user_id = ? AND id != ?').run(auth.userId, auth.sessionId);
+    ]);
+    await db.query('DELETE FROM sessions WHERE user_id = $1 AND id != $2', [auth.userId, auth.sessionId]);
     res.status(204).end();
   });
 

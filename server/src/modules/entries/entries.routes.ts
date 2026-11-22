@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { z } from 'zod';
-import { type Db, type Row, transaction } from '../../db/database.js';
+import { type Db, type Row, one } from '../../db/database.js';
 import { getAuth } from '../../middleware/auth.js';
+import { Filter } from '../../utils/filter.js';
 import { HttpError, notFound } from '../../utils/errors.js';
 import { escapeLike, idParam, intensity, isoDate, nowIso, pageQuery, parseJsonArray, tagList } from '../../utils/schemas.js';
 import { parse } from '../../utils/validate.js';
@@ -91,65 +92,56 @@ export function entriesRouter(db: Db): Router {
   const router = Router();
 
   const getRow = (ownerId: string, id: string) =>
-    db.prepare('SELECT * FROM entries WHERE id = ? AND owner_id = ?').get(id, ownerId) as Row | undefined;
+    one(db, 'SELECT * FROM entries WHERE id = $1 AND owner_id = $2', [id, ownerId]);
 
-  router.get('/', (_req, res) => {
+  router.get('/', async (req, res) => {
     const { userId } = getAuth(res);
-    const q = parse(listQuery, _req.query);
-    const where = ['owner_id = ?'];
-    const params: (string | number)[] = [userId];
+    const q = parse(listQuery, req.query);
+    const f = new Filter().add('owner_id = ?', userId);
     if (q.q) {
-      where.push("(title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')");
       const like = `%${escapeLike(q.q)}%`;
-      params.push(like, like);
+      f.add("(title ILIKE ? ESCAPE '\\' OR body ILIKE ? ESCAPE '\\')", like, like);
     }
-    const add = (clause: string, value: string) => {
-      where.push(clause);
-      params.push(value);
-    };
-    if (q.from) add('entry_date >= ?', q.from);
-    if (q.to) add('entry_date <= ?', q.to);
-    if (q.mood) add('mood = ?', q.mood);
+    if (q.from) f.add('entry_date >= ?', q.from);
+    if (q.to) f.add('entry_date <= ?', q.to);
+    if (q.mood) f.add('mood = ?', q.mood);
     if (q.emotion) {
-      where.push('EXISTS (SELECT 1 FROM json_each(entries.emotions) WHERE lower(value) = lower(?))');
-      params.push(q.emotion);
+      f.add('EXISTS (SELECT 1 FROM jsonb_array_elements_text(entries.emotions) AS v(value) WHERE lower(v.value) = lower(?))', q.emotion);
     }
     if (q.tag) {
-      where.push('EXISTS (SELECT 1 FROM json_each(entries.context_tags) WHERE lower(value) = lower(?))');
-      params.push(q.tag);
+      f.add('EXISTS (SELECT 1 FROM jsonb_array_elements_text(entries.context_tags) AS v(value) WHERE lower(v.value) = lower(?))', q.tag);
     }
-    if (q.drafts === 'exclude') where.push('is_draft = 0');
-    if (q.drafts === 'only') where.push('is_draft = 1');
-    const clause = where.join(' AND ');
+    if (q.drafts === 'exclude') f.add('is_draft = FALSE');
+    if (q.drafts === 'only') f.add('is_draft = TRUE');
     const dir = q.sort === 'oldest' ? 'ASC' : 'DESC';
-    const { total } = db.prepare(`SELECT COUNT(*) AS total FROM entries WHERE ${clause}`).get(...params) as {
-      total: number;
-    };
-    const rows = db
-      .prepare(`SELECT * FROM entries WHERE ${clause} ORDER BY entry_date ${dir}, id ${dir} LIMIT ? OFFSET ?`)
-      .all(...params, q.limit, q.offset) as Row[];
+    const { total } = (await one<{ total: number }>(db, `SELECT COUNT(*)::int AS total FROM entries WHERE ${f.clause}`, f.params))!;
+    const limit = f.push(q.limit);
+    const offset = f.push(q.offset);
+    const rows = await db.query(
+      `SELECT * FROM entries WHERE ${f.clause} ORDER BY entry_date ${dir}, id ${dir} LIMIT ${limit} OFFSET ${offset}`,
+      f.params,
+    );
     res.json({ items: rows.map(toEntry), total, limit: q.limit, offset: q.offset });
   });
 
-  router.get('/facets', (_req, res) => {
+  router.get('/facets', async (_req, res) => {
     const { userId } = getAuth(res);
-    const distinct = (column: string) =>
+    const distinct = async (column: 'emotions' | 'context_tags') =>
       (
-        db
-          .prepare(
-            `SELECT DISTINCT value FROM entries, json_each(entries.${column}) WHERE owner_id = ? ORDER BY lower(value)`,
-          )
-          .all(userId) as { value: string }[]
+        await db.query<{ value: string }>(
+          `SELECT value FROM (
+             SELECT DISTINCT v.value AS value FROM entries, jsonb_array_elements_text(entries.${column}) AS v(value) WHERE owner_id = $1
+           ) t ORDER BY lower(value), value`,
+          [userId],
+        )
       ).map((r) => r.value);
     const moods = (
-      db.prepare('SELECT DISTINCT mood FROM entries WHERE owner_id = ? AND mood IS NOT NULL ORDER BY mood').all(userId) as {
-        mood: string;
-      }[]
+      await db.query<{ mood: string }>('SELECT DISTINCT mood FROM entries WHERE owner_id = $1 AND mood IS NOT NULL ORDER BY mood', [userId])
     ).map((r) => r.mood);
-    res.json({ moods, emotions: distinct('emotions'), contextTags: distinct('context_tags') });
+    res.json({ moods, emotions: await distinct('emotions'), contextTags: await distinct('context_tags') });
   });
 
-  router.get('/on-this-day', (req, res) => {
+  router.get('/on-this-day', async (req, res) => {
     const { userId } = getAuth(res);
     const q = parse(onThisDayQuery, req.query);
     let formatter: Intl.DateTimeFormat;
@@ -160,9 +152,7 @@ export function entriesRouter(db: Db): Router {
     }
     const monthDay = q.date.slice(5);
     const year = q.date.slice(0, 4);
-    const rows = db
-      .prepare('SELECT * FROM entries WHERE owner_id = ? AND is_draft = 0 ORDER BY entry_date DESC')
-      .all(userId) as Row[];
+    const rows = await db.query('SELECT * FROM entries WHERE owner_id = $1 AND is_draft = FALSE ORDER BY entry_date DESC', [userId]);
     const match = rows.find((r) => {
       const local = formatter.format(new Date(String(r.entry_date)));
       return local.slice(5) === monthDay && local.slice(0, 4) !== year;
@@ -170,82 +160,83 @@ export function entriesRouter(db: Db): Router {
     res.json({ entry: match ? toEntry(match) : null });
   });
 
-  router.post('/', (req, res) => {
+  router.post('/', async (req, res) => {
     const { userId } = getAuth(res);
     const body = parse(createSchema, req.body);
     assertWritable(body);
     const id = randomUUID();
     const now = nowIso();
-    transaction(db, () => {
-      db.prepare(
+    await db.transaction(async (tx) => {
+      await tx.query(
         `INSERT INTO entries (id, owner_id, title, body, body_format, entry_date, mood, emotions, intensity, context_tags, is_draft, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        id,
-        userId,
-        body.title,
-        body.body,
-        body.bodyFormat,
-        body.entryDate,
-        body.mood,
-        JSON.stringify(body.emotions),
-        body.intensity,
-        JSON.stringify(body.contextTags),
-        Number(body.isDraft),
-        now,
-        now,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10::jsonb, $11, $12, $12)`,
+        [
+          id,
+          userId,
+          body.title,
+          body.body,
+          body.bodyFormat,
+          body.entryDate,
+          body.mood,
+          JSON.stringify(body.emotions),
+          body.intensity,
+          JSON.stringify(body.contextTags),
+          body.isDraft,
+          now,
+        ],
       );
-      syncEntryMood(db, userId, { id, entryDate: body.entryDate, mood: body.mood, emotions: body.emotions, intensity: body.intensity });
+      await syncEntryMood(tx, userId, { id, entryDate: body.entryDate, mood: body.mood, emotions: body.emotions, intensity: body.intensity });
     });
-    res.status(201).json({ entry: toEntry(getRow(userId, id)!) });
+    res.status(201).json({ entry: toEntry((await getRow(userId, id))!) });
   });
 
-  router.get('/:id', (req, res) => {
+  router.get('/:id', async (req, res) => {
     const { userId } = getAuth(res);
     const { id } = parse(idParam, req.params);
-    const row = getRow(userId, id);
+    const row = await getRow(userId, id);
     if (!row) throw notFound('That entry');
     res.json({ entry: toEntry(row) });
   });
 
-  router.patch('/:id', (req, res) => {
+  router.patch('/:id', async (req, res) => {
     const { userId } = getAuth(res);
     const { id } = parse(idParam, req.params);
     const patch = parse(updateSchema, req.body);
-    const row = getRow(userId, id);
+    const row = await getRow(userId, id);
     if (!row) throw notFound('That entry');
     const merged = { ...toEntry(row), ...patch };
     assertWritable(merged);
-    transaction(db, () => {
-      db.prepare(
-        `UPDATE entries SET title = ?, body = ?, body_format = ?, entry_date = ?, mood = ?, emotions = ?, intensity = ?,
-         context_tags = ?, is_draft = ?, updated_at = ? WHERE id = ? AND owner_id = ?`,
-      ).run(
-        merged.title,
-        merged.body,
-        merged.bodyFormat,
-        merged.entryDate,
-        merged.mood,
-        JSON.stringify(merged.emotions),
-        merged.intensity,
-        JSON.stringify(merged.contextTags),
-        Number(merged.isDraft),
-        nowIso(),
-        id,
-        userId,
+    await db.transaction(async (tx) => {
+      await tx.query(
+        `UPDATE entries SET title = $1, body = $2, body_format = $3, entry_date = $4, mood = $5, emotions = $6::jsonb, intensity = $7,
+         context_tags = $8::jsonb, is_draft = $9, updated_at = $10 WHERE id = $11 AND owner_id = $12`,
+        [
+          merged.title,
+          merged.body,
+          merged.bodyFormat,
+          merged.entryDate,
+          merged.mood,
+          JSON.stringify(merged.emotions),
+          merged.intensity,
+          JSON.stringify(merged.contextTags),
+          merged.isDraft,
+          nowIso(),
+          id,
+          userId,
+        ],
       );
-      syncEntryMood(db, userId, merged);
+      await syncEntryMood(tx, userId, merged);
     });
-    res.json({ entry: toEntry(getRow(userId, id)!) });
+    res.json({ entry: toEntry((await getRow(userId, id))!) });
   });
 
-  router.delete('/:id', (req, res) => {
+  router.delete('/:id', async (req, res) => {
     const { userId } = getAuth(res);
     const { id } = parse(idParam, req.params);
-    if (!getRow(userId, id)) throw notFound('That entry');
-    transaction(db, () => {
-      db.prepare("DELETE FROM mood_checkins WHERE owner_id = ? AND linked_entry_id = ? AND source = 'entry'").run(userId, id);
-      db.prepare('DELETE FROM entries WHERE id = ? AND owner_id = ?').run(id, userId);
+    if (!(await getRow(userId, id))) throw notFound('That entry');
+    await db.transaction(async (tx) => {
+      await tx.query("DELETE FROM mood_checkins WHERE owner_id = $1 AND linked_entry_id = $2 AND source = 'entry'", [userId, id]);
+      await tx.query('DELETE FROM entries WHERE id = $1 AND owner_id = $2', [id, userId]);
     });
     res.status(204).end();
   });

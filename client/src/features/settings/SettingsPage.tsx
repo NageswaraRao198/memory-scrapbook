@@ -202,7 +202,7 @@ export function SettingsPage() {
 
       <Section title="Privacy and AI" id="s-privacy">
         <div className="space-y-2 text-muted">
-          <p><strong className="font-medium text-ink">Where your writing lives.</strong> In a single database file on the computer or server running this app. It is only readable after you sign in, and nothing is sent to analytics or third-party scripts.</p>
+          <p><strong className="font-medium text-ink">Where your writing lives.</strong> In a managed Postgres database that belongs to you, reachable only by this app. It is only readable after you sign in, and nothing is sent to analytics or third-party scripts.</p>
           <p><strong className="font-medium text-ink">AI.</strong> This version of the scrapbook has no AI provider connected, so no part of your diary is sent to any external service. If one is added later, it will stay off until you explicitly allow it, and it will tell you what would be shared and with whom.</p>
         </div>
         <label className="flex cursor-pointer items-start gap-3">
@@ -224,15 +224,14 @@ export function SettingsPage() {
         <div className="flex flex-wrap gap-3">
           <a className="btn btn-quiet" href="/api/v1/export?format=json" download><Icon name="download" size={16} /> Export as JSON</a>
           <a className="btn btn-quiet" href="/api/v1/export?format=markdown" download><Icon name="download" size={16} /> Export as Markdown</a>
-          <a className="btn btn-quiet" href="/api/v1/export/backup" download><Icon name="download" size={16} /> Download a full backup</a>
         </div>
         <details className="rounded-lg bg-surface-2 p-4 text-sm text-muted">
-          <summary className="cursor-pointer font-medium text-ink">How backups and restores work</summary>
-          <ol className="mt-3 list-decimal space-y-1 pl-5">
-            <li>Use <em>Download a full backup</em> regularly and keep the file somewhere safe, such as an encrypted drive. It contains your diary and sign-in details.</li>
-            <li>To restore, stop the server, replace the database file (the path in <code>DATABASE_PATH</code>) with your backup, and start the server again.</li>
-            <li>The JSON and Markdown exports are for reading and moving your writing elsewhere, not for restoring this app.</li>
-          </ol>
+          <summary className="cursor-pointer font-medium text-ink">How your data is kept safe</summary>
+          <ul className="mt-3 list-disc space-y-1 pl-5">
+            <li>Your diary is stored in a managed Postgres database, separate from the website, so redeploying or restarting the site never erases it.</li>
+            <li>Download the JSON export now and then and keep it somewhere safe, such as an encrypted drive. It is your own backup.</li>
+            <li>The Markdown export is a readable copy you can open in any text editor.</li>
+          </ul>
         </details>
       </Section>
 

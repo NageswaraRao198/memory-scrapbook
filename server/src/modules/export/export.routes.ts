@@ -1,11 +1,7 @@
-import { randomUUID } from 'node:crypto';
-import { readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 import { Router } from 'express';
 import { z } from 'zod';
 import type { AppConfig } from '../../config/env.js';
-import { type Db, type Row, transaction } from '../../db/database.js';
+import { type Db, type Row } from '../../db/database.js';
 import { SESSION_COOKIE, getAuth, sessionCookieOptions } from '../../middleware/auth.js';
 import { parse } from '../../utils/validate.js';
 import { toEntry } from '../entries/entries.routes.js';
@@ -16,18 +12,18 @@ import { toReflection } from '../reflections/reflections.routes.js';
 const exportQuery = z.object({ format: z.enum(['json', 'markdown']).default('json') });
 const deleteSchema = z.object({ confirm: z.literal('DELETE'), deleteAccount: z.boolean().default(false) });
 
-function loadAll(db: Db, ownerId: string) {
-  const all = (table: string, order: string) =>
-    db.prepare(`SELECT * FROM ${table} WHERE owner_id = ? ORDER BY ${order}`).all(ownerId) as Row[];
+async function loadAll(db: Db, ownerId: string) {
+  const all = (table: string, order: string): Promise<Row[]> =>
+    db.query(`SELECT * FROM ${table} WHERE owner_id = $1 ORDER BY ${order}`, [ownerId]);
   return {
-    entries: all('entries', 'entry_date ASC').map(toEntry),
-    moodCheckIns: all('mood_checkins', 'recorded_at ASC').map(toMoodCheckIn),
-    memories: all('memories', 'memory_date ASC').map(toMemory),
-    reflections: all('reflections', 'created_at ASC').map(toReflection),
+    entries: (await all('entries', 'entry_date ASC')).map(toEntry),
+    moodCheckIns: (await all('mood_checkins', 'recorded_at ASC')).map(toMoodCheckIn),
+    memories: (await all('memories', 'memory_date ASC')).map(toMemory),
+    reflections: (await all('reflections', 'created_at ASC')).map(toReflection),
   };
 }
 
-type ExportData = ReturnType<typeof loadAll>;
+type ExportData = Awaited<ReturnType<typeof loadAll>>;
 
 export function renderMarkdown(data: ExportData, exportedAt: string): string {
   const lines: string[] = ['# The Memory Scrapbook - export', '', `Exported on ${exportedAt}`, ''];
@@ -81,11 +77,11 @@ export function renderMarkdown(data: ExportData, exportedAt: string): string {
 export function exportRouter(db: Db, config: AppConfig): Router {
   const router = Router();
 
-  router.get('/export', (req, res) => {
+  router.get('/export', async (req, res) => {
     const { userId } = getAuth(res);
     const { format } = parse(exportQuery, req.query);
     const exportedAt = new Date().toISOString();
-    const data = loadAll(db, userId);
+    const data = await loadAll(db, userId);
     res.setHeader('Cache-Control', 'no-store');
     const stamp = exportedAt.slice(0, 10);
     if (format === 'markdown') {
@@ -98,31 +94,14 @@ export function exportRouter(db: Db, config: AppConfig): Router {
     res.json({ app: 'memory-scrapbook', version: 1, exportedAt, ...data });
   });
 
-  router.get('/export/backup', async (_req, res) => {
-    getAuth(res);
-    const target = path.join(tmpdir(), `scrapbook-backup-${randomUUID()}.db`);
-    try {
-      db.exec(`VACUUM INTO '${target.replaceAll("'", "''")}'`);
-      const file = await readFile(target);
-      res.setHeader('Cache-Control', 'no-store');
-      res.setHeader('Content-Type', 'application/octet-stream');
-      res.setHeader('Content-Disposition', `attachment; filename="memory-scrapbook-backup-${new Date().toISOString().slice(0, 10)}.db"`);
-      res.send(file);
-    } finally {
-      await rm(target, { force: true });
-    }
-  });
-
-  router.delete('/account/data', (req, res) => {
+  router.delete('/account/data', async (req, res) => {
     const { userId } = getAuth(res);
     const body = parse(deleteSchema, req.body);
-    transaction(db, () => {
+    await db.transaction(async (tx) => {
       for (const table of ['mood_checkins', 'memories', 'reflections', 'entries']) {
-        db.prepare(`DELETE FROM ${table} WHERE owner_id = ?`).run(userId);
+        await tx.query(`DELETE FROM ${table} WHERE owner_id = $1`, [userId]);
       }
-      if (body.deleteAccount) {
-        db.prepare('DELETE FROM users WHERE id = ?').run(userId);
-      }
+      if (body.deleteAccount) await tx.query('DELETE FROM users WHERE id = $1', [userId]);
     });
     if (body.deleteAccount) res.clearCookie(SESSION_COOKIE, sessionCookieOptions(config));
     res.status(204).end();

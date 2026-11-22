@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Db, Row } from '../../db/database.js';
+import { type Queryable, type Row, one } from '../../db/database.js';
 import { nowIso, parseJsonArray } from '../../utils/schemas.js';
 
 export function toMoodCheckIn(row: Row) {
@@ -29,24 +29,28 @@ interface EntryMoodFields {
  * Keeps exactly one entry-sourced mood check-in per diary entry so the Mood Garden
  * never shows duplicates for the same moment.
  */
-export function syncEntryMood(db: Db, ownerId: string, entry: EntryMoodFields): void {
-  const existing = db
-    .prepare("SELECT id FROM mood_checkins WHERE owner_id = ? AND linked_entry_id = ? AND source = 'entry'")
-    .get(ownerId, entry.id) as { id: string } | undefined;
+export async function syncEntryMood(db: Queryable, ownerId: string, entry: EntryMoodFields): Promise<void> {
+  const existing = await one<{ id: string }>(
+    db,
+    "SELECT id FROM mood_checkins WHERE owner_id = $1 AND linked_entry_id = $2 AND source = 'entry'",
+    [ownerId, entry.id],
+  );
 
   if (!entry.mood) {
-    if (existing) db.prepare('DELETE FROM mood_checkins WHERE id = ?').run(existing.id);
+    if (existing) await db.query('DELETE FROM mood_checkins WHERE id = $1', [existing.id]);
     return;
   }
   const now = nowIso();
   if (existing) {
-    db.prepare(
-      'UPDATE mood_checkins SET recorded_at = ?, mood = ?, emotions = ?, intensity = ?, updated_at = ? WHERE id = ?',
-    ).run(entry.entryDate, entry.mood, JSON.stringify(entry.emotions), entry.intensity, now, existing.id);
+    await db.query(
+      'UPDATE mood_checkins SET recorded_at = $1, mood = $2, emotions = $3::jsonb, intensity = $4, updated_at = $5 WHERE id = $6',
+      [entry.entryDate, entry.mood, JSON.stringify(entry.emotions), entry.intensity, now, existing.id],
+    );
   } else {
-    db.prepare(
+    await db.query(
       `INSERT INTO mood_checkins (id, owner_id, recorded_at, mood, emotions, intensity, note, linked_entry_id, source, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'entry', ?, ?)`,
-    ).run(randomUUID(), ownerId, entry.entryDate, entry.mood, JSON.stringify(entry.emotions), entry.intensity, entry.id, now, now);
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, NULL, $7, 'entry', $8, $8)`,
+      [randomUUID(), ownerId, entry.entryDate, entry.mood, JSON.stringify(entry.emotions), entry.intensity, entry.id, now],
+    );
   }
 }

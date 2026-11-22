@@ -1,7 +1,8 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import type { AppConfig } from '../config/env.js';
-import type { Db, Row } from '../db/database.js';
+import type { Db } from '../db/database.js';
+import { one } from '../db/database.js';
 import { HttpError } from '../utils/errors.js';
 
 export const SESSION_COOKIE = 'scrapbook.sid';
@@ -31,14 +32,18 @@ export function sessionCookieOptions(config: AppConfig, maxAgeMs?: number) {
   };
 }
 
-export function createSession(db: Db, config: AppConfig, userId: string) {
+export async function createSession(db: Db, config: AppConfig, userId: string) {
   const token = randomBytes(32).toString('base64url');
   const csrfToken = randomBytes(24).toString('base64url');
   const now = new Date();
   const ttlMs = config.sessionTtlDays * 86_400_000;
-  db.prepare(
-    'INSERT INTO sessions (id, user_id, csrf_token, created_at, expires_at) VALUES (?, ?, ?, ?, ?)',
-  ).run(hashToken(token), userId, csrfToken, now.toISOString(), new Date(now.getTime() + ttlMs).toISOString());
+  await db.query('INSERT INTO sessions (id, user_id, csrf_token, created_at, expires_at) VALUES ($1, $2, $3, $4, $5)', [
+    hashToken(token),
+    userId,
+    csrfToken,
+    now.toISOString(),
+    new Date(now.getTime() + ttlMs).toISOString(),
+  ]);
   return { token, csrfToken, ttlMs };
 }
 
@@ -69,24 +74,22 @@ export function originCheck(config: AppConfig) {
 }
 
 export function loadSession(db: Db, config: AppConfig) {
-  return (req: Request, res: Response, next: NextFunction) => {
+  return async (req: Request, res: Response, next: NextFunction) => {
     const token = req.cookies?.[SESSION_COOKIE] as string | undefined;
     if (!token) return next();
     const id = hashToken(token);
-    const row = db.prepare('SELECT user_id, csrf_token, expires_at FROM sessions WHERE id = ?').get(id) as
-      | Row
-      | undefined;
+    const row = await one(db, 'SELECT user_id, csrf_token, expires_at FROM sessions WHERE id = $1', [id]);
     if (!row) return next();
     const expiresAt = new Date(String(row.expires_at));
     if (expiresAt.getTime() <= Date.now()) {
-      db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+      await db.query('DELETE FROM sessions WHERE id = $1', [id]);
       res.clearCookie(SESSION_COOKIE, sessionCookieOptions(config));
       return next();
     }
     const ttlMs = config.sessionTtlDays * 86_400_000;
     if (expiresAt.getTime() - Date.now() < ttlMs / 2) {
       const renewed = new Date(Date.now() + ttlMs);
-      db.prepare('UPDATE sessions SET expires_at = ? WHERE id = ?').run(renewed.toISOString(), id);
+      await db.query('UPDATE sessions SET expires_at = $1 WHERE id = $2', [renewed.toISOString(), id]);
       res.cookie(SESSION_COOKIE, token, sessionCookieOptions(config, ttlMs));
     }
     res.locals.auth = { userId: String(row.user_id), sessionId: id, csrfToken: String(row.csrf_token) } satisfies AuthContext;

@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { z } from 'zod';
-import type { Db, Row } from '../../db/database.js';
+import { type Db, type Row, one } from '../../db/database.js';
 import { getAuth } from '../../middleware/auth.js';
 import { notFound } from '../../utils/errors.js';
+import { Filter } from '../../utils/filter.js';
 import { idParam, isoDate, nowIso, optionalText, pageQuery } from '../../utils/schemas.js';
 import { parse } from '../../utils/validate.js';
 
@@ -41,56 +42,56 @@ const listQuery = z.object({ type: z.enum(REFLECTION_TYPES).optional(), ...pageQ
 export function reflectionsRouter(db: Db): Router {
   const router = Router();
   const getRow = (ownerId: string, id: string) =>
-    db.prepare('SELECT * FROM reflections WHERE id = ? AND owner_id = ?').get(id, ownerId) as Row | undefined;
+    one(db, 'SELECT * FROM reflections WHERE id = $1 AND owner_id = $2', [id, ownerId]);
 
-  router.get('/', (req, res) => {
+  router.get('/', async (req, res) => {
     const { userId } = getAuth(res);
     const q = parse(listQuery, req.query);
-    const where = ['owner_id = ?'];
-    const params: (string | number)[] = [userId];
-    if (q.type) {
-      where.push('type = ?');
-      params.push(q.type);
-    }
-    const clause = where.join(' AND ');
-    const { total } = db.prepare(`SELECT COUNT(*) AS total FROM reflections WHERE ${clause}`).get(...params) as { total: number };
-    const rows = db
-      .prepare(`SELECT * FROM reflections WHERE ${clause} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
-      .all(...params, q.limit, q.offset) as Row[];
+    const f = new Filter().add('owner_id = ?', userId);
+    if (q.type) f.add('type = ?', q.type);
+    const { total } = (await one<{ total: number }>(db, `SELECT COUNT(*)::int AS total FROM reflections WHERE ${f.clause}`, f.params))!;
+    const limit = f.push(q.limit);
+    const offset = f.push(q.offset);
+    const rows = await db.query(
+      `SELECT * FROM reflections WHERE ${f.clause} ORDER BY created_at DESC, id DESC LIMIT ${limit} OFFSET ${offset}`,
+      f.params,
+    );
     res.json({ items: rows.map(toReflection), total, limit: q.limit, offset: q.offset });
   });
 
-  router.post('/', (req, res) => {
+  router.post('/', async (req, res) => {
     const { userId } = getAuth(res);
     const body = parse(createSchema, req.body);
     const id = randomUUID();
     const now = nowIso();
-    db.prepare(
+    await db.query(
       `INSERT INTO reflections (id, owner_id, type, title, prompt, response, period_start, period_end, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(id, userId, body.type, body.title, body.prompt, body.response, body.periodStart, body.periodEnd, now, now);
-    res.status(201).json({ reflection: toReflection(getRow(userId, id)!) });
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)`,
+      [id, userId, body.type, body.title, body.prompt, body.response, body.periodStart, body.periodEnd, now],
+    );
+    res.status(201).json({ reflection: toReflection((await getRow(userId, id))!) });
   });
 
-  router.patch('/:id', (req, res) => {
+  router.patch('/:id', async (req, res) => {
     const { userId } = getAuth(res);
     const { id } = parse(idParam, req.params);
     const patch = parse(updateSchema, req.body);
-    const row = getRow(userId, id);
+    const row = await getRow(userId, id);
     if (!row) throw notFound('That reflection');
     const merged = { ...toReflection(row), ...patch };
-    db.prepare(
-      `UPDATE reflections SET type = ?, title = ?, prompt = ?, response = ?, period_start = ?, period_end = ?, updated_at = ?
-       WHERE id = ? AND owner_id = ?`,
-    ).run(merged.type, merged.title, merged.prompt, merged.response, merged.periodStart, merged.periodEnd, nowIso(), id, userId);
-    res.json({ reflection: toReflection(getRow(userId, id)!) });
+    await db.query(
+      `UPDATE reflections SET type = $1, title = $2, prompt = $3, response = $4, period_start = $5, period_end = $6, updated_at = $7
+       WHERE id = $8 AND owner_id = $9`,
+      [merged.type, merged.title, merged.prompt, merged.response, merged.periodStart, merged.periodEnd, nowIso(), id, userId],
+    );
+    res.json({ reflection: toReflection((await getRow(userId, id))!) });
   });
 
-  router.delete('/:id', (req, res) => {
+  router.delete('/:id', async (req, res) => {
     const { userId } = getAuth(res);
     const { id } = parse(idParam, req.params);
-    if (!getRow(userId, id)) throw notFound('That reflection');
-    db.prepare('DELETE FROM reflections WHERE id = ? AND owner_id = ?').run(id, userId);
+    if (!(await getRow(userId, id))) throw notFound('That reflection');
+    await db.query('DELETE FROM reflections WHERE id = $1 AND owner_id = $2', [id, userId]);
     res.status(204).end();
   });
 

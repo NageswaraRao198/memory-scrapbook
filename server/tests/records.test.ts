@@ -67,7 +67,7 @@ describe('memories and reflections', () => {
   });
 });
 
-describe('export, backup and deletion', () => {
+describe('export and deletion', () => {
   it('exports everything as JSON and Markdown', async () => {
     const s = await signUpOwner(buildTestApp().app);
     await s.post('/entries', { title: 'Hello', body: 'Dear diary', mood: 'Happy', entryDate: '2025-01-02T00:00:00Z' });
@@ -90,18 +90,6 @@ describe('export, backup and deletion', () => {
     expect(md.text).toContain('Answer');
   });
 
-  it('downloads a restorable backup of the database', async () => {
-    const s = await signUpOwner(buildTestApp().app);
-    await s.post('/entries', { body: 'Backed up words' });
-    const res = await s.agent.get('/api/v1/export/backup').buffer(true).parse((r, cb) => {
-      const chunks: Buffer[] = [];
-      r.on('data', (c: Buffer) => chunks.push(c));
-      r.on('end', () => cb(null, Buffer.concat(chunks)));
-    });
-    expect(res.status).toBe(200);
-    expect((res.body as Buffer).subarray(0, 15).toString()).toBe('SQLite format 3');
-  });
-
   it('requires explicit confirmation before deleting, then deletes content but keeps the account', async () => {
     const s = await signUpOwner(buildTestApp().app);
     await s.post('/entries', { body: 'x', mood: 'Happy' });
@@ -119,14 +107,15 @@ describe('export, backup and deletion', () => {
     expect((await s.get('/auth/me')).status).toBe(200);
   });
 
-  it('can delete the account too, returning to first-time setup', async () => {
+  it('removes everything when the account is deleted', async () => {
     const ctx = buildTestApp();
     const s = await signUpOwner(ctx.app);
     await s.post('/entries', { body: 'x' });
     expect((await s.del('/account/data', { confirm: 'DELETE', deleteAccount: true })).status).toBe(204);
     expect((await s.get('/auth/me')).status).toBe(401);
     expect((await request(ctx.app).get('/api/v1/auth/status')).body.setupRequired).toBe(true);
-    expect((ctx.db.prepare('SELECT COUNT(*) AS c FROM entries').get() as { c: number }).c).toBe(0);
+    const row = (await ctx.db.query<{ c: number }>('SELECT COUNT(*)::int AS c FROM entries'))[0];
+    expect(row?.c).toBe(0);
   });
 });
 

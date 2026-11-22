@@ -47,6 +47,7 @@ export const optionalText = (max: number) =>
     .transform((v) => (v ? v : null));
 
 export function parseJsonArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((x): x is string => typeof x === 'string');
   if (typeof value !== 'string') return [];
   try {
     const parsed: unknown = JSON.parse(value);

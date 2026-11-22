@@ -28,11 +28,11 @@ export function createApp(db: Db, config: AppConfig): Express {
     res.setHeader('Cache-Control', 'no-store');
     next();
   });
-  api.use(originCheck(config));
-  api.use(loadSession(db, config));
   api.get('/health', (_req, res) => {
     res.json({ ok: true });
   });
+  api.use(originCheck(config));
+  api.use(loadSession(db, config));
   api.use('/auth', authRouter(db, config));
   api.use('/entries', requireAuth, entriesRouter(db));
   api.use('/mood-checkins', requireAuth, moodsRouter(db));
