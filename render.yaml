@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: memory-scrapbook
+    runtime: node
+    # Persistent disks require a paid instance type. On the free plan the SQLite file
+    # would be wiped on every deploy/restart, so do not use "free" for real diary data.
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    disk:
+      name: scrapbook-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 24
+      - key: NODE_ENV
+        value: production
+      - key: TRUST_PROXY
+        value: "true"
+      - key: DATABASE_PATH
+        value: /var/data/scrapbook.db
+      - key: SESSION_TTL_DAYS
+        value: "14"
+      # Auto-generated secret; view it under Environment in the Render dashboard.
+      # Needed once, on the first-run "Create my diary" screen, so strangers cannot claim your diary.
+      - key: SETUP_TOKEN
+        generateValue: true
