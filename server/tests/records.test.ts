@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PASSWORD, buildTestApp, signUpOwner } from './helpers.js';
+import { PASSWORD, PIN, buildTestApp, signUpOwner } from './helpers.js';
 import request from 'supertest';
 
 describe('mood check-ins', () => {
@@ -124,7 +124,7 @@ describe('end-to-end journey (API level)', () => {
     const ctx = buildTestApp();
     await signUpOwner(ctx.app, 'me@example.com');
     const agent = request.agent(ctx.app);
-    const login = await agent.post('/api/v1/auth/login').send({ email: 'me@example.com', password: PASSWORD });
+    const login = await agent.post('/api/v1/auth/login').send({ email: 'me@example.com', password: PASSWORD, pin: PIN });
     const csrf = login.body.csrfToken as string;
     const entry = (await agent.post('/api/v1/entries').set('X-CSRF-Token', csrf).send({ title: 'Today', body: 'It rained.', mood: 'Peaceful', emotions: ['cosy'] })).body.entry;
     const found = await agent.get('/api/v1/entries?q=rained');

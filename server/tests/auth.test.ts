@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
-import { PASSWORD, buildTestApp, signUpOwner } from './helpers.js';
+import { PASSWORD, PIN, buildTestApp, signUpOwner } from './helpers.js';
 
 describe('authentication', () => {
   it('reports that setup is required until an owner exists, then refuses a second owner', async () => {
@@ -8,27 +8,34 @@ describe('authentication', () => {
     expect((await request(app).get('/api/v1/auth/status')).body).toEqual({ setupRequired: true, setupTokenRequired: false });
     await signUpOwner(app);
     expect((await request(app).get('/api/v1/auth/status')).body).toEqual({ setupRequired: false, setupTokenRequired: false });
-    const second = await request(app).post('/api/v1/auth/setup').send({ email: 'x@example.com', password: PASSWORD });
+    const second = await request(app).post('/api/v1/auth/setup').send({ email: 'x@example.com', password: PASSWORD, pin: PIN });
     expect(second.status).toBe(409);
   });
 
   it('requires the setup code when one is configured', async () => {
     const ctx = buildTestApp({ setupToken: 'letmein-123' });
     expect((await request(ctx.app).get('/api/v1/auth/status')).body).toEqual({ setupRequired: true, setupTokenRequired: true });
-    const body = { email: 'a@example.com', password: PASSWORD };
+    const body = { email: 'a@example.com', password: PASSWORD, pin: PIN };
     expect((await request(ctx.app).post('/api/v1/auth/setup').send(body)).status).toBe(403);
     expect((await request(ctx.app).post('/api/v1/auth/setup').send({ ...body, setupToken: 'nope' })).status).toBe(403);
     expect((await request(ctx.app).post('/api/v1/auth/setup').send({ ...body, setupToken: 'letmein-123' })).status).toBe(201);
   });
 
-  it('rejects short passwords and stores only a hash', async () => {
+  it('rejects short passwords and malformed PINs, and stores only hashes', async () => {
     const { app, db } = buildTestApp();
-    const weak = await request(app).post('/api/v1/auth/setup').send({ email: 'a@example.com', password: 'short' });
+    const weak = await request(app).post('/api/v1/auth/setup').send({ email: 'a@example.com', password: 'short', pin: PIN });
     expect(weak.status).toBe(400);
+    for (const bad of ['12345', '1234567', 'abcdef', '']) {
+      const res = await request(app).post('/api/v1/auth/setup').send({ email: 'a@example.com', password: PASSWORD, pin: bad });
+      expect(res.status).toBe(400);
+    }
+    expect((await request(app).post('/api/v1/auth/setup').send({ email: 'a@example.com', password: PASSWORD })).status).toBe(400);
     await signUpOwner(app);
-    const [row] = await db.query<{ password_hash: string }>('SELECT password_hash FROM users');
+    const [row] = await db.query<{ password_hash: string; pin_hash: string }>('SELECT password_hash, pin_hash FROM users');
     expect(row!.password_hash).not.toContain(PASSWORD);
     expect(row!.password_hash.startsWith('scrypt$')).toBe(true);
+    expect(row!.pin_hash).not.toContain(PIN);
+    expect(row!.pin_hash.startsWith('scrypt$')).toBe(true);
   });
 
   it('requires a session for private routes', async () => {
@@ -39,18 +46,37 @@ describe('authentication', () => {
     expect(res.body.error.code).toBe('unauthenticated');
   });
 
-  it('signs in with the right password and rejects the wrong one', async () => {
+  it('signs in only with the right email, password and PIN', async () => {
     const { app } = buildTestApp();
     await signUpOwner(app, 'me@example.com');
-    const bad = await request(app).post('/api/v1/auth/login').send({ email: 'me@example.com', password: 'wrong-password-123' });
-    expect(bad.status).toBe(401);
-    const unknown = await request(app).post('/api/v1/auth/login').send({ email: 'nobody@example.com', password: PASSWORD });
-    expect(unknown.status).toBe(401);
-    const ok = await request(app).post('/api/v1/auth/login').send({ email: 'me@example.com', password: PASSWORD });
+    const login = (body: object) => request(app).post('/api/v1/auth/login').send(body);
+    expect((await login({ email: 'me@example.com', password: 'wrong-password-123', pin: PIN })).status).toBe(401);
+    expect((await login({ email: 'nobody@example.com', password: PASSWORD, pin: PIN })).status).toBe(401);
+    expect((await login({ email: 'me@example.com', password: PASSWORD })).status).toBe(401);
+    expect((await login({ email: 'me@example.com', password: PASSWORD, pin: '000000' })).status).toBe(401);
+    const ok = await login({ email: 'me@example.com', password: PASSWORD, pin: PIN });
     expect(ok.status).toBe(200);
+    expect(ok.body.user.hasPin).toBe(true);
+    expect(JSON.stringify(ok.body)).not.toContain('pin_hash');
     const cookie = ok.headers['set-cookie']?.[0] ?? '';
     expect(cookie).toContain('HttpOnly');
     expect(cookie).toContain('SameSite=Strict');
+  });
+
+  it('changes the PIN, signs out other sessions, and lets older accounts without a PIN set one', async () => {
+    const { app, db } = buildTestApp();
+    const s = await signUpOwner(app, 'me@example.com');
+    expect((await s.post('/auth/change-pin', { currentPassword: PASSWORD, currentPin: '111111', newPin: '135790' })).status).toBe(400);
+    expect((await s.post('/auth/change-pin', { currentPassword: PASSWORD, currentPin: PIN, newPin: '12ab56' })).status).toBe(400);
+    expect((await s.post('/auth/change-pin', { currentPassword: PASSWORD, currentPin: PIN, newPin: '135790' })).status).toBe(204);
+    const login = (pin: string) => request(app).post('/api/v1/auth/login').send({ email: 'me@example.com', password: PASSWORD, pin });
+    expect((await login(PIN)).status).toBe(401);
+    expect((await login('135790')).status).toBe(200);
+
+    await db.query('UPDATE users SET pin_hash = NULL');
+    const legacy = await request(app).post('/api/v1/auth/login').send({ email: 'me@example.com', password: PASSWORD });
+    expect(legacy.status).toBe(200);
+    expect(legacy.body.user.hasPin).toBe(false);
   });
 
   it('blocks state-changing requests without the CSRF token', async () => {
@@ -91,7 +117,7 @@ describe('authentication', () => {
     const { app } = buildTestApp();
     const first = await signUpOwner(app, 'me@example.com');
     const other = await request.agent(app);
-    const login = await other.post('/api/v1/auth/login').send({ email: 'me@example.com', password: PASSWORD });
+    const login = await other.post('/api/v1/auth/login').send({ email: 'me@example.com', password: PASSWORD, pin: PIN });
     expect(login.status).toBe(200);
 
     const wrong = await first.post('/auth/change-password', { currentPassword: 'nope-nope-nope', newPassword: 'another-long-password' });
@@ -100,7 +126,7 @@ describe('authentication', () => {
     expect(ok.status).toBe(204);
     expect((await other.get('/api/v1/auth/me')).status).toBe(401);
     expect((await first.get('/auth/me')).status).toBe(200);
-    const relogin = await request(app).post('/api/v1/auth/login').send({ email: 'me@example.com', password: 'another-long-password' });
+    const relogin = await request(app).post('/api/v1/auth/login').send({ email: 'me@example.com', password: 'another-long-password', pin: PIN });
     expect(relogin.status).toBe(200);
   });
 

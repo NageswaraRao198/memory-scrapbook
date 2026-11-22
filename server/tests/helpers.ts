@@ -6,6 +6,7 @@ import { type Db, createPgliteDb, migrate } from '../src/db/database.js';
 import { hashPassword } from '../src/utils/password.js';
 
 export const PASSWORD = 'a-long-gentle-password';
+export const PIN = '246810';
 
 /** An in-memory Postgres that is created and migrated on first use, so tests can build the app synchronously. */
 function lazyTestDb(): Db {
@@ -52,7 +53,7 @@ function wrap(app: Parameters<typeof request.agent>[0], csrf: string, userId: st
 
 export async function signUpOwner(app: Parameters<typeof request.agent>[0], email = 'owner@example.com'): Promise<Session> {
   const session = wrap(app, '', '');
-  const res = await session.agent.post('/api/v1/auth/setup').send({ email, password: PASSWORD, timezone: 'UTC' });
+  const res = await session.agent.post('/api/v1/auth/setup').send({ email, password: PASSWORD, pin: PIN, timezone: 'UTC' });
   if (res.status !== 201) throw new Error(`setup failed: ${res.status} ${JSON.stringify(res.body)}`);
   session.csrf = res.body.csrfToken;
   session.userId = res.body.user.id;
@@ -65,14 +66,15 @@ export async function addUserAndSignIn(
 ): Promise<Session> {
   const id = randomUUID();
   const now = new Date().toISOString();
-  await ctx.db.query('INSERT INTO users (id, email, password_hash, created_at, updated_at) VALUES ($1, $2, $3, $4, $4)', [
+  await ctx.db.query('INSERT INTO users (id, email, password_hash, pin_hash, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $5)', [
     id,
     email,
     await hashPassword(PASSWORD),
+    await hashPassword(PIN),
     now,
   ]);
   const session = wrap(ctx.app, '', id);
-  const res = await session.agent.post('/api/v1/auth/login').send({ email, password: PASSWORD });
+  const res = await session.agent.post('/api/v1/auth/login').send({ email, password: PASSWORD, pin: PIN });
   if (res.status !== 200) throw new Error(`login failed: ${res.status}`);
   session.csrf = res.body.csrfToken;
   return session;

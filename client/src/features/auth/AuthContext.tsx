@@ -8,8 +8,8 @@ interface AuthValue {
   status: Status;
   user: User | null;
   sessionExpired: boolean;
-  login: (email: string, password: string) => Promise<void>;
-  setup: (input: { email: string; password: string; displayName?: string; timezone: string; setupToken?: string }) => Promise<void>;
+  login: (email: string, password: string, pin: string) => Promise<void>;
+  setup: (input: { email: string; password: string; pin: string; displayName?: string; timezone: string; setupToken?: string }) => Promise<void>;
   logout: () => Promise<void>;
   updateProfile: (patch: Partial<UserPreferences> & { displayName?: string | null }) => Promise<void>;
   resetAfterAccountDeletion: () => void;
@@ -78,8 +78,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       status,
       user,
       sessionExpired,
-      login: async (email, password) => {
-        const res = await api.post<{ user: User; csrfToken: string }>('/auth/login', { email, password });
+      login: async (email, password, pin) => {
+        const res = await api.post<{ user: User; csrfToken: string }>('/auth/login', { email, password, pin: pin || undefined });
         signedIn(res.user, res.csrfToken);
       },
       setup: async (input) => {

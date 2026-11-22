@@ -15,6 +15,7 @@ export function toUser(row: Row) {
     id: String(row.id),
     email: String(row.email),
     displayName: (row.display_name as string | null) ?? null,
+    hasPin: Boolean(row.pin_hash),
     timezone: String(row.timezone),
     preferences: {
       theme: String(row.theme) as 'light' | 'dark' | 'system',
@@ -37,15 +38,27 @@ const timezone = z
     }
   }, 'Unknown timezone');
 
+const pin = z.string().regex(/^\d{6}$/, 'The PIN must be exactly 6 digits.');
+
 const setupSchema = z.object({
   email: z.string().trim().toLowerCase().email().max(200),
   password,
+  pin,
   displayName: z.string().trim().max(80).optional(),
   timezone: timezone.optional(),
   setupToken: z.string().max(200).optional(),
 });
-const loginSchema = z.object({ email: z.string().trim().toLowerCase().max(200), password: z.string().max(200) });
+const loginSchema = z.object({
+  email: z.string().trim().toLowerCase().max(200),
+  password: z.string().max(200),
+  pin: z.string().max(20).optional(),
+});
 const changePasswordSchema = z.object({ currentPassword: z.string().max(200), newPassword: password });
+const changePinSchema = z.object({
+  currentPassword: z.string().max(200),
+  currentPin: z.string().max(20).optional(),
+  newPin: pin,
+});
 const profileSchema = z
   .object({
     displayName: z.string().trim().max(80).nullable(),
@@ -97,9 +110,9 @@ export function authRouter(db: Db, config: AppConfig): Router {
     const id = randomUUID();
     const now = nowIso();
     await db.query(
-      `INSERT INTO users (id, email, password_hash, display_name, timezone, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $6)`,
-      [id, body.email, await hashPassword(body.password), body.displayName ?? null, body.timezone ?? 'UTC', now],
+      `INSERT INTO users (id, email, password_hash, pin_hash, display_name, timezone, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $7)`,
+      [id, body.email, await hashPassword(body.password), await hashPassword(body.pin), body.displayName ?? null, body.timezone ?? 'UTC', now],
     );
     const csrfToken = await startSession(res, id);
     res.status(201).json({ user: toUser((await findUser(id))!), csrfToken });
@@ -109,8 +122,12 @@ export function authRouter(db: Db, config: AppConfig): Router {
     const body = parse(loginSchema, req.body);
     const row = await one(db, 'SELECT * FROM users WHERE email = $1', [body.email]);
     dummyHash ??= hashPassword('not-a-real-password');
-    const valid = await verifyPassword(body.password, row ? String(row.password_hash) : await dummyHash);
-    if (!row || !valid) throw new HttpError(401, 'invalid_credentials', 'That email and password do not match.');
+    const passwordOk = await verifyPassword(body.password, row ? String(row.password_hash) : await dummyHash);
+    // Accounts created before PINs existed (no pin_hash) can still sign in, then set a PIN in Settings.
+    const pinOk = row?.pin_hash ? await verifyPassword(body.pin ?? '', String(row.pin_hash)) : true;
+    if (!row || !passwordOk || !pinOk) {
+      throw new HttpError(401, 'invalid_credentials', 'That email, password and PIN do not match.');
+    }
     const csrfToken = await startSession(res, String(row.id));
     res.json({ user: toUser(row), csrfToken });
   });
@@ -157,6 +174,22 @@ export function authRouter(db: Db, config: AppConfig): Router {
     }
     await db.query('UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3', [
       await hashPassword(body.newPassword),
+      nowIso(),
+      auth.userId,
+    ]);
+    await db.query('DELETE FROM sessions WHERE user_id = $1 AND id != $2', [auth.userId, auth.sessionId]);
+    res.status(204).end();
+  });
+
+  router.post('/change-pin', requireAuth, limiter, async (req, res) => {
+    const auth = getAuth(res);
+    const body = parse(changePinSchema, req.body);
+    const row = (await findUser(auth.userId))!;
+    const passwordOk = await verifyPassword(body.currentPassword, String(row.password_hash));
+    const pinOk = row.pin_hash ? await verifyPassword(body.currentPin ?? '', String(row.pin_hash)) : true;
+    if (!passwordOk || !pinOk) throw new HttpError(400, 'wrong_credentials', 'Your current password or PIN does not match.');
+    await db.query('UPDATE users SET pin_hash = $1, updated_at = $2 WHERE id = $3', [
+      await hashPassword(body.newPin),
       nowIso(),
       auth.userId,
     ]);

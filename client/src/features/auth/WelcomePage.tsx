@@ -3,6 +3,7 @@ import { ApiError } from '../../lib/api';
 import { localTimezone } from '../../lib/dates';
 import { Flower } from '../../components/Flower';
 import { InlineError } from '../../components/States';
+import { PinInput } from '../../components/PinInput';
 import { useAuth } from './AuthContext';
 
 export function WelcomePage({ mode }: { mode: 'setup' | 'signin' }) {
@@ -10,6 +11,8 @@ export function WelcomePage({ mode }: { mode: 'setup' | 'signin' }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
+  const [pin, setPin] = useState('');
+  const [confirmPin, setConfirmPin] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [setupToken, setSetupToken] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -23,15 +26,25 @@ export function WelcomePage({ mode }: { mode: 'setup' | 'signin' }) {
       setError('The two passwords do not match yet.');
       return;
     }
+    if (isSetup && !/^\d{6}$/.test(pin)) {
+      setError('Choose a PIN of exactly 6 digits.');
+      return;
+    }
+    if (isSetup && pin !== confirmPin) {
+      setError('The two PINs do not match yet.');
+      return;
+    }
     setBusy(true);
     try {
       if (isSetup) {
-        await setup({ email, password, displayName: displayName || undefined, timezone: localTimezone(), setupToken: setupToken || undefined });
+        await setup({ email, password, pin, displayName: displayName || undefined, timezone: localTimezone(), setupToken: setupToken || undefined });
       } else {
-        await login(email, password);
+        await login(email, password, pin);
       }
     } catch (err) {
       setError(err instanceof ApiError ? err.issues[0]?.message ?? err.message : 'Something went wrong. Please try again.');
+      setPin('');
+      setConfirmPin('');
       setBusy(false);
     }
   };
@@ -89,6 +102,14 @@ export function WelcomePage({ mode }: { mode: 'setup' | 'signin' }) {
                 <input id="confirm" type="password" className="field" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" required />
               </div>
             )}
+            <PinInput
+              id="pin"
+              label="6-digit PIN"
+              value={pin}
+              onChange={setPin}
+              description={isSetup ? 'You will type this every time you sign in. Your browser will not save it.' : 'Not saved by your browser, so type it each visit.'}
+            />
+            {isSetup && <PinInput id="confirm-pin" label="Confirm PIN" value={confirmPin} onChange={setConfirmPin} />}
             {isSetup && (
               <div>
                 <label htmlFor="setupToken" className="label">Setup code (only if your host gave you one)</label>

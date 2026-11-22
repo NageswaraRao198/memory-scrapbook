@@ -8,6 +8,7 @@ export interface User {
   id: string;
   email: string;
   displayName: string | null;
+  hasPin: boolean;
   timezone: string;
   preferences: UserPreferences;
 }

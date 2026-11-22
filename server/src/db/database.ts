@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   email TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
+  pin_hash TEXT,
   display_name TEXT,
   timezone TEXT NOT NULL DEFAULT 'UTC',
   theme TEXT NOT NULL DEFAULT 'light',
@@ -106,6 +107,8 @@ CREATE INDEX IF NOT EXISTS idx_reflections_owner_created ON reflections(owner_id
 
 export async function migrate(db: Db): Promise<void> {
   await db.exec(SCHEMA);
+  // Databases created before the sign-in PIN existed.
+  await db.exec('ALTER TABLE users ADD COLUMN IF NOT EXISTS pin_hash TEXT');
 }
 
 /** A hosted Postgres database (for example Neon). */

@@ -10,7 +10,7 @@ and revisit it all later. No streaks, no scores, no public sharing.
 
 | Area | What you get |
 | --- | --- |
-| **Welcome / sign-in** | First-run setup creates the single owner account (no public registration). Server-side sessions, `HttpOnly` + `SameSite=Strict` cookies, CSRF token, rate-limited login, sliding session expiry. |
+| **Welcome / sign-in** | First-run setup creates the single owner account (no public registration). Sign-in needs email, password **and a 6-digit PIN** that browsers are told not to save, so a saved password alone cannot open your diary. Server-side sessions, `HttpOnly` + `SameSite=Strict` cookies, CSRF token, rate-limited login, sliding session expiry. |
 | **Home** | Greeting, today's prompt, quick mood check-in, recent pages, "On this day" (only when a real past entry exists), a reflection question. |
 | **My Diary** | Distraction-free-capable Markdown editor with debounced **autosave**, visible save status, retry on failure, local safety copy, leave-page protection, draft handling. Archive grouped by month, **calendar view**, search, filters (date range, feeling, emotion tag, context tag), sort, "show more". |
 | **Mood Garden** | Each recorded feeling becomes a flower (colour = feeling, petals = intensity). Month view, day details linked to diary pages, and gentle, non-diagnostic observations that only appear once there is enough data. |

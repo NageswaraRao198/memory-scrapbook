@@ -1,5 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { ConfirmDialog } from '../../components/Modal';
+import { PinInput } from '../../components/PinInput';
 import { Icon } from '../../components/Icon';
 import { InlineError, PageHeader } from '../../components/States';
 import { useToast } from '../../components/Toast';
@@ -62,6 +63,68 @@ function ChangePassword() {
       {error && <InlineError>{error}</InlineError>}
       <div>
         <button type="submit" className="btn btn-primary" disabled={busy || !current || !next}>Change password</button>
+      </div>
+    </form>
+  );
+}
+
+function ChangePin() {
+  const user = useUser();
+  const { updateProfile } = useAuth();
+  const toast = useToast();
+  const [password, setPassword] = useState('');
+  const [currentPin, setCurrentPin] = useState('');
+  const [newPin, setNewPin] = useState('');
+  const [confirmPin, setConfirmPin] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    if (!/^\d{6}$/.test(newPin)) {
+      setError('Choose a PIN of exactly 6 digits.');
+      return;
+    }
+    if (newPin !== confirmPin) {
+      setError('The two PINs do not match yet.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.post('/auth/change-pin', { currentPassword: password, currentPin: currentPin || undefined, newPin });
+      await updateProfile({});
+      toast('Your PIN has been saved. Other devices were signed out.');
+      setPassword('');
+      setCurrentPin('');
+      setNewPin('');
+      setConfirmPin('');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.issues[0]?.message ?? err.message : 'We could not change that just now.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className="grid max-w-md gap-4" noValidate>
+      <p className="text-muted">
+        {user.hasPin
+          ? 'Your 6-digit PIN is asked for at every sign-in and is never saved by your browser.'
+          : 'You have no PIN yet. Set one so a saved password alone cannot open your diary.'}
+      </p>
+      <div>
+        <label htmlFor="pin-password" className="label">Current password</label>
+        <input id="pin-password" type="password" className="field" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} />
+      </div>
+      {user.hasPin && <PinInput id="pin-current" label="Current PIN" value={currentPin} onChange={setCurrentPin} />}
+      <PinInput id="pin-new" label={user.hasPin ? 'New PIN' : 'PIN'} value={newPin} onChange={setNewPin} description="Exactly 6 digits." />
+      <PinInput id="pin-confirm" label="Confirm PIN" value={confirmPin} onChange={setConfirmPin} />
+      {error && <InlineError>{error}</InlineError>}
+      <div>
+        <button type="submit" className="btn btn-primary" disabled={busy || !password || newPin.length < 6}>
+          {user.hasPin ? 'Change PIN' : 'Set PIN'}
+        </button>
       </div>
     </form>
   );
@@ -237,6 +300,8 @@ export function SettingsPage() {
 
       <Section title="Security" id="s-security">
         <ChangePassword />
+        <hr className="divider" />
+        <ChangePin />
         <hr className="divider" />
         <button type="button" className="btn btn-quiet" onClick={() => void logout()}>Sign out</button>
       </Section>
